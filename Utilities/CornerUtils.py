@@ -20,7 +20,8 @@ class CircuitAnalyzer:
     Usage:
         # Automatically loads colors from team_colors.json in this folder
         Corner = CircuitAnalyzer(session)
-        Corner.entry.braking_dist(7)
+        Corner.entry.braking_dist(7)       # Specific corner
+        Corner.all.velo_dist()             # Average across ALL corners
     """
     def __init__(self, session, team_colors=None):
         self.session = session
@@ -38,6 +39,7 @@ class CircuitAnalyzer:
         # Initialize sub-modules
         self.entry = EntryPhase(self)
         self.exit = ExitPhase(self)
+        self.all = AllPhase(self)
 
     def _load_default_colors(self):
         """Loads team_colors.json from the same directory as this script."""
@@ -233,4 +235,115 @@ class ExitPhase:
         self.parent._plot_distribution(
             df, 'Driver', 'Value', f"Turn {corner_number} Distance to Full Throttle", 
             "Meters after Apex", f"T{corner_number}_ThrottleCommit", higher_is_better=False
+        )
+
+class AllPhase:
+    def __init__(self, parent):
+        self.parent = parent
+
+    def velo_dist(self):
+        """
+        Calculates the Average Minimum (Apex) Speed across ALL corners for each lap.
+        """
+        print("Analyzing Average Apex Speed across ALL corners...")
+        
+        # Get all corner distances
+        corners = self.parent.circuit_info.corners
+        corner_distances = corners['Distance'].tolist()
+        
+        data = []
+        
+        for drv in self.parent.session.drivers:
+            drv_laps = self.parent.laps.pick_drivers(drv)
+            if drv_laps.empty: continue
+            
+            driver_code = self.parent.session.get_driver(drv)['Abbreviation']
+            team_name = drv_laps.iloc[0]['Team']
+
+            for _, lap in drv_laps.iterlaps():
+                try:
+                    # Get telemetry once per lap to optimize speed
+                    car = lap.get_car_data().add_distance()
+                    
+                    apex_speeds = []
+                    
+                    for dist in corner_distances:
+                        # Window: +/- 20m around apex
+                        start_w, end_w = dist - 20, dist + 20
+                        
+                        mask = (car['Distance'] > start_w) & (car['Distance'] < end_w)
+                        zone = car.loc[mask]
+                        
+                        if not zone.empty:
+                            apex_speeds.append(zone['Speed'].min())
+                    
+                    # Calculate average apex speed for this lap
+                    if apex_speeds:
+                        avg_apex_speed = np.mean(apex_speeds)
+                        data.append({'Driver': driver_code, 'Team': team_name, 'Value': avg_apex_speed})
+                        
+                except Exception:
+                    continue
+
+        df = pd.DataFrame(data)
+        self.parent._plot_distribution(
+            df, 'Driver', 'Value', 
+            "Average Apex Speed (All Corners)", 
+            "Average Speed (km/h)", 
+            "AllCorners_ApexSpeed",
+            higher_is_better=True
+        )
+
+    def braking_dist(self):
+        """
+        Calculates the Average Braking Distance across ALL braking zones for each lap.
+        """
+        print("Analyzing Average Braking Distance across ALL corners...")
+        
+        corners = self.parent.circuit_info.corners
+        corner_distances = corners['Distance'].tolist()
+        
+        data = []
+        
+        for drv in self.parent.session.drivers:
+            drv_laps = self.parent.laps.pick_drivers(drv)
+            if drv_laps.empty: continue
+            
+            driver_code = self.parent.session.get_driver(drv)['Abbreviation']
+            team_name = drv_laps.iloc[0]['Team']
+
+            for _, lap in drv_laps.iterlaps():
+                try:
+                    car = lap.get_car_data().add_distance()
+                    braking_dists = []
+                    
+                    for dist in corner_distances:
+                        # Look for braking 250m before to 50m after corner
+                        start_w, end_w = dist - 250, dist + 50
+                        
+                        mask = (car['Distance'] > start_w) & (car['Distance'] < end_w)
+                        zone = car.loc[mask]
+                        
+                        braking = zone[zone['Brake'] >= 1]
+                        if not braking.empty:
+                            b_dist = braking['Distance'].max() - braking['Distance'].min()
+                            # Only include valid braking zones (e.g. not lifting for 5m)
+                            if 10 < b_dist < 250:
+                                braking_dists.append(b_dist)
+                    
+                    # Calculate average braking distance for this lap
+                    if braking_dists:
+                        avg_brake_dist = np.mean(braking_dists)
+                        data.append({'Driver': driver_code, 'Team': team_name, 'Value': avg_brake_dist})
+                        
+                except Exception:
+                    continue
+
+        df = pd.DataFrame(data)
+        self.parent._plot_distribution(
+            df, 'Driver', 'Value', 
+            "Average Braking Distance (All Corners)", 
+            "Avg Distance (m)", 
+            "AllCorners_BrakingDist",
+            higher_is_better=False
         )
